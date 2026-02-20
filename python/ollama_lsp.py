@@ -39,7 +39,7 @@ class OllamaServer:
         
         @self.server.feature(types.TEXT_DOCUMENT_COMPLETION)
         def completions(params: types.CompletionParams):
-            return []
+            return self.debounce_completion(params)
 
         @self.server.feature(types.TEXT_DOCUMENT_DID_CHANGE)
         def change(params: types.DidChangeTextDocumentParams):

@@ -145,15 +145,24 @@ class CompletionEngine:
 
     def _debug_stream(self, stream):
         """Wrap stream iterator and log raw chunks when debug mode is enabled."""
-        if not self.debug:
-            return stream
-
         def iterator():
             for chunk in stream:
-                self._debug_log("raw_chunk", chunk)
-                yield chunk
+                normalized_chunk = self._normalize_chunk(chunk)
+                if self.debug:
+                    self._debug_log("raw_chunk", normalized_chunk)
+                yield normalized_chunk
 
         return iterator()
+
+    def _normalize_chunk(self, chunk: Any) -> Dict[str, Any]:
+        """Convert Ollama SDK response chunks into plain dicts for stable indexing."""
+        if isinstance(chunk, dict):
+            return chunk
+        if hasattr(chunk, "model_dump"):
+            return chunk.model_dump()
+        if hasattr(chunk, "dict"):
+            return chunk.dict()
+        return {"response": str(chunk)}
 
     def _debug_log(self, event: str, payload: Any) -> None:
         """Append debug records to a local log file without disturbing stdio LSP traffic."""
