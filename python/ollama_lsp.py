@@ -1,6 +1,7 @@
+"""Pygls server that streams cursor-local completions from Ollama."""
+
 from pygls.server import LanguageServer
 from lsprotocol import types
-#import requests
 from completion_engine import CompletionEngine
 import re
 import asyncio
@@ -12,14 +13,14 @@ import asyncio
 
 # ------------------ LSP Server ----------------
 def send_log(message, line, col, file="f/na"): 
-    #headers = {'Content-type': 'application/json'}
-    #requests.post("http://localhost:8000",headers=headers, json={"message": message, "file": file.split('/')[-1], "line" : line, "col" : col})
+    """No-op logger retained for backwards compatibility hooks."""
     return
 async def async_generator_wrapper(generator):
     for item in generator:
         yield item
 
 class OllamaServer:
+    """Neovim-facing LSP transport for completion requests and suggestion state."""
 
     def __init__(self):
         self.server = LanguageServer("example-server", "v0.2")
@@ -46,12 +47,29 @@ class OllamaServer:
 
 
     def on_initialize(self, params: types.InitializeParams):
-        headers = {'Content-type': 'application/json'}
         send_log(f"Initialized, Opts: {params.initialization_options}", 0, 0)
-        init_options = params.initialization_options
+        init_options = params.initialization_options or {}
 
-        self.engine = CompletionEngine(init_options.get('model_name', "deepseek-coder:base"), init_options.get("ollama_url", None), options=init_options.get('ollama_model_opts', {}))
-        self.stream_suggestion = params.initialization_options.get('stream_suggestion', False)
+        model_opts = init_options.get('ollama_model_opts', {}) or {}
+        # Autocomplete-oriented defaults that still allow user overrides.
+        model_opts.setdefault('temperature', 0.1)
+        model_opts.setdefault('top_p', 0.9)
+        model_opts.setdefault('num_predict', 128)
+        model_opts.setdefault('num_ctx', 8192)
+        model_opts.setdefault('fim_enabled', True)
+        model_opts.setdefault('fim_mode', 'auto')
+        model_opts.setdefault('context_lines_before', 80)
+        model_opts.setdefault('context_lines_after', 40)
+        model_opts.setdefault('max_prefix_chars', 8000)
+        model_opts.setdefault('max_suffix_chars', 3000)
+        model_opts.setdefault('stop', ['<|im_start|>', '<|im_end|>', '<|fim_prefix|>', '<|fim_suffix|>', '<|fim_middle|>', '```'])
+
+        self.engine = CompletionEngine(
+            init_options.get('model_name', "deepseek-coder:base"),
+            init_options.get("ollama_url", None),
+            options=model_opts,
+        )
+        self.stream_suggestion = init_options.get('stream_suggestion', False)
 
         return {
             "capabilities": {
@@ -81,7 +99,14 @@ class OllamaServer:
 
         document = self.server.workspace.get_text_document(params.text_document.uri)
         lines = document.lines
-        suggestion_stream = async_generator_wrapper(self.engine.complete(lines, params.position.line, params.position.character))
+        suggestion_stream = async_generator_wrapper(
+            self.engine.complete(
+                lines,
+                params.position.line,
+                params.position.character,
+                filetype=getattr(document, 'language_id', ''),
+            )
+        )
 
         self.curr_suggestion = {'line' : params.position.line + 1, 'character' : params.position.character, 'suggestion': ''}
         timing_str = ''
@@ -192,4 +217,3 @@ class OllamaServer:
 if __name__ == "__main__":
     server = OllamaServer()
     server.start()
-

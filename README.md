@@ -46,15 +46,28 @@ Lazy:
 {
   'jacob411/Ollama-Copilot',
   opts = {
-    model_name = "deepseek-coder:base",
+    -- Prefer base code models for autocomplete, not *-instruct chat variants.
+    model_name = "qwen2.5-coder:7b",
     ollama_url = "http://localhost:11434", -- URL for Ollama server, Leave blank to use default local instance.
     stream_suggestion = false,
     python_command = "python3",
     filetypes = {'python', 'lua','vim', "markdown"},
     capabilities = nil, -- LSP capabilities, auto-detected if not provided
     ollama_model_opts = {
-        num_predict = 40,
-        temperature = 0.1,
+        temperature = 0.1, -- keep low entropy for stable tab completion
+        top_p = 0.9,
+        num_predict = 128, -- 64-256 is usually best for autocomplete
+        num_ctx = 8192,
+        fim_enabled = true, -- include prefix + suffix (Fill-in-the-middle)
+        fim_mode = "auto", -- "auto" | "template" | "manual" | "off"
+        context_lines_before = 80,
+        context_lines_after = 40,
+        max_prefix_chars = 8000,
+        max_suffix_chars = 3000,
+        stop = { "<|im_start|>", "<|im_end|>", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "```" },
+        -- Internal payload/response logging (or set OLLAMA_COPILOT_DEBUG=1).
+        -- debug = true,
+        -- debug_log_file = "/tmp/ollama-copilot-debug.log",
     },
     keymaps = {
         suggestion = '<leader>os',
@@ -94,11 +107,26 @@ Ollama copilot language server will attach when you enter a buffer and can be vi
 :LspInfo
 ```
 ### Recomendations
-Smaller models (<3 billion parameters) work best for tab completion tasks, providing low latency and minimal CPU usage.
-- [deepseek-coder](https://ollama.com/library/deepseek-coder:1.3b) - 1.3B
-- [starcoder](https://ollama.com/library/starcoder:1b) - 1B
-- [codegemma](https://ollama.com/library/codegemma:2b) - 2B
-- [starcoder2](https://ollama.com/library/starcoder2:3b) - 3B
+Prefer base coder models for completion quality (`qwen2.5-coder:*`, `deepseek-coder:*`) and avoid `*-instruct` unless you explicitly want chat-like behavior.  
+`3B` models are fast but can be weak/unstable on instruction-heavy files (markdown/docs), so `7B` is often a better default if your machine can handle it.
+
+### Payload Debugging
+To inspect exact requests sent to Ollama and raw streamed chunks:
+```bash
+OLLAMA_COPILOT_DEBUG=1 nvim
+```
+or set in `ollama_model_opts`:
+```lua
+debug = true
+debug_log_file = "/tmp/ollama-copilot-debug.log"
+```
+
+### Minimal Repro Script
+Use the included payload test script to verify prompt shape and suffix usage:
+```bash
+cd ~/repo/fork/Ollama-Copilot
+python3 python/payload_debug_demo.py
+```
   
 ## Contributing
 Contributions are welcome! If you have any ideas for new features, improvements, or bug fixes, please open an issue or submit a pull request.
@@ -107,4 +135,3 @@ I am hopeful to add more on the model side as well, as I am interested in finetu
 
 ## License
 This project is licensed under the MIT License.
-

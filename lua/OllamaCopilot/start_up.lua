@@ -25,14 +25,25 @@ local M = {}
 -- Default configuration
 local default_config = {
     model_name = "deepseek-coder:base",
+    ollama_url = "http://localhost:11434",
     stream_suggestion = false,
     python_command = "python3",
     filetypes = {'python', 'lua','vim', "markdown"},
     capabilities = nil, -- Will be set automatically or can be overridden by user
     ollama_model_opts = {
-        num_predict = 40,
+        num_predict = 128,
         temperature = 0.1,
-        --stop = {'\n'}
+        top_p = 0.9,
+        num_ctx = 8192,
+        fim_enabled = true,
+        fim_mode = "auto",
+        context_lines_before = 80,
+        context_lines_after = 40,
+        max_prefix_chars = 8000,
+        max_suffix_chars = 3000,
+        stop = { "<|im_start|>", "<|im_end|>", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "```" },
+        -- debug = true,
+        -- debug_log_file = "/tmp/ollama-copilot-debug.log",
     },
     keymaps = {
         suggestion = '<leader>os',
@@ -122,6 +133,7 @@ function M.setup(user_config)
                 settings = {},
                 init_options = {
                     model_name = config.model_name,
+                    ollama_url = config.ollama_url,
                     stream_suggestion = config.stream_suggestion,
                     ollama_model_opts = config.ollama_model_opts,
                 },
@@ -228,4 +240,3 @@ end
 
 
 return M
-
