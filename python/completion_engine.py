@@ -64,7 +64,7 @@ class CompletionEngine:
         force_manual_fim: bool = False,
     ) -> Dict[str, Any]:
         """Construct Ollama `generate` payload with prompt/suffix and constrained options."""
-        _prefix, suffix, local_indent = self._split_prefix_suffix(lines=lines, line=line, character=character)
+        prefix, suffix, local_indent = self._split_prefix_suffix(lines=lines, line=line, character=character)
         centered_prefix = self._centered_prefix(lines=lines, line=line, character=character, filetype=filetype, indent=local_indent)
 
         payload: Dict[str, Any] = {
@@ -76,12 +76,12 @@ class CompletionEngine:
         use_template_fim = self.fim_enabled and not force_manual_fim and self.fim_mode in ("auto", "template")
 
         if use_template_fim:
-            payload["prompt"] = centered_prefix
+            payload["prompt"] = prefix[-self.max_prefix_chars :]
             payload["suffix"] = suffix[: self.max_suffix_chars]
             return payload
 
         if self.fim_enabled:
-            payload["prompt"] = self._manual_fim_prompt(centered_prefix, suffix)
+            payload["prompt"] = self._manual_fim_prompt(prefix[-self.max_prefix_chars :], suffix)
             return payload
 
         payload["prompt"] = centered_prefix + "\n"

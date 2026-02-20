@@ -116,13 +116,13 @@ class OllamaServer:
                 self.cancel_suggestion = False
                 return []
 
-            self.curr_suggestion['suggestion'] += chunk['response']
-            if 'context' in chunk:
-                total_duration = chunk['total_duration'] / 10**9
-                load_duration = chunk['load_duration'] / 10**9
-                prompt_eval_duration = chunk['prompt_eval_duration'] / 10**9
-                eval_count = chunk['eval_count']
-                eval_duration = chunk['eval_duration'] / 10**9
+            self.curr_suggestion['suggestion'] += chunk.get('response') or ''
+            if chunk.get('context'):
+                total_duration = (chunk.get('total_duration') or 0) / 10**9
+                load_duration = (chunk.get('load_duration') or 0) / 10**9
+                prompt_eval_duration = (chunk.get('prompt_eval_duration') or 0) / 10**9
+                eval_count = chunk.get('eval_count') or 0
+                eval_duration = (chunk.get('eval_duration') or 0) / 10**9
                 timing_str = f"""
                     Total duration: {total_duration},
                     Load duration: {load_duration},
@@ -135,9 +135,14 @@ class OllamaServer:
                                      self.curr_suggestion['character'],
                                      suggestion_type='stream')
             
-        self.send_suggestion(self.strip_suggestion(self.curr_suggestion['suggestion']),
-                             self.curr_suggestion['line'], self.curr_suggestion['character'],
-                             suggestion_type='completion')
+        cleaned = self.strip_suggestion(self.curr_suggestion['suggestion'])
+        if cleaned:
+            self.send_suggestion(
+                cleaned,
+                self.curr_suggestion['line'],
+                self.curr_suggestion['character'],
+                suggestion_type='completion',
+            )
         
         send_log(f"{timing_str}: {self.curr_suggestion['suggestion']}",
                    params.position.line,
@@ -207,8 +212,11 @@ class OllamaServer:
 
 
     def strip_suggestion(self, text):
-      stripped_text = text.rstrip('\n')
-      return re.sub(r'\n{2,}', '\n', stripped_text)
+      cleaned = (text or "").replace("\r", "")
+      # Truncate obvious prompt-template leakage from model output.
+      cleaned = re.split(r"\n\[[A-Z_]+\]", cleaned, maxsplit=1)[0]
+      cleaned = cleaned.strip("\n")
+      return re.sub(r"\n{2,}", "\n", cleaned)
 
     
     def start(self):
