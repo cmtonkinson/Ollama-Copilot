@@ -1,309 +1,309 @@
+---Ollama Copilot startup orchestration.
+---Handles configuration merge, Python runtime resolution, LSP registration, and UI hooks.
 
-local lspconfig = require 'lspconfig'
-local ghost_text = require 'OllamaCopilot.ghost_text'
-local ollama_client = require 'OllamaCopilot.lsp_client'
-local configs = require 'lspconfig.configs'
-
--- TODO : update tabs and spacing to be uniform at the client side
-
-
-
-
-
-
-
-
-
-
-
-
-
+local lspconfig = require("lspconfig")
+local configs = require("lspconfig.configs")
+local ghost_text = require("OllamaCopilot.ghost_text")
+local ollama_client = require("OllamaCopilot.lsp_client")
 
 local M = {}
 
--- TODO : smoother experience (no flickering) (need to not block the main thread with completion, or add client side logic to handle changes)
--- Default configuration
+---Default plugin configuration.
 local default_config = {
-    model_name = "deepseek-coder:base",
-    ollama_url = "http://localhost:11434",
-    stream_suggestion = false,
-    python_command = nil,
-    auto_manage_python_env = true,
-    python_bootstrap_command = "python3",
-    python_venv_dir = nil,
-    filetypes = {'python', 'lua','vim', "markdown"},
-    capabilities = nil, -- Will be set automatically or can be overridden by user
-    ollama_model_opts = {
-        num_predict = 128,
-        temperature = 0.1,
-        top_p = 0.9,
-        num_ctx = 8192,
-        fim_enabled = true,
-        fim_mode = "auto",
-        context_lines_before = 80,
-        context_lines_after = 40,
-        max_prefix_chars = 8000,
-        max_suffix_chars = 3000,
-        stop = { "<|im_start|>", "<|im_end|>", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "```" },
-        -- debug = true,
-        -- debug_log_file = "/tmp/ollama-copilot-debug.log",
-    },
-    keymaps = {
-        suggestion = '<leader>os',
-        reject = '<leader>or',
-        insert_accept = '<Tab>',
-    },
+  model_name = "deepseek-coder:base",
+  ollama_url = "http://localhost:11434",
+  stream_suggestion = false,
+  python_command = nil,
+  auto_manage_python_env = true,
+  python_bootstrap_command = "python3",
+  python_venv_dir = nil,
+  filetypes = { "python", "lua", "vim", "markdown" },
+  capabilities = nil,
+  ollama_model_opts = {
+    num_predict = 128,
+    temperature = 0.1,
+    top_p = 0.9,
+    num_ctx = 8192,
+    fim_enabled = true,
+    fim_mode = "auto",
+    context_lines_before = 80,
+    context_lines_after = 40,
+    max_prefix_chars = 8000,
+    max_suffix_chars = 3000,
+    stop = { "<|im_start|>", "<|im_end|>", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "```" },
+  },
+  keymaps = {
+    suggestion = "<leader>os",
+    reject = "<leader>or",
+    insert_accept = "<Tab>",
+  },
 }
 
-
-
+local IMPORT_PROBE = "import pygls, ollama"
 local enabled = true
 
----Build plugin root directory from this source file path.
+---@param msg string
+local function notify_error(msg)
+  vim.schedule(function()
+    vim.notify(msg, vim.log.levels.ERROR)
+  end)
+end
+
+---@param cmd string[]
+---@return boolean ok
+---@return string output
+local function run_system(cmd)
+  local output = vim.fn.system(cmd)
+  return vim.v.shell_error == 0, output
+end
+
+---@param cmd string[]
+---@return string output
+local function run_command_or_error(cmd)
+  local ok, output = run_system(cmd)
+  if ok then
+    return output
+  end
+
+  local rendered = table.concat(cmd, " ")
+  error(("Ollama Copilot command failed (%s): %s"):format(rendered, output))
+end
+
+---@param python_bin string
+---@return boolean ok
+---@return string output
+local function probe_python_modules(python_bin)
+  return run_system({ python_bin, "-c", IMPORT_PROBE })
+end
+
 ---@return string
 local function plugin_root()
-    local source = debug.getinfo(1, 'S').source
-    return source:sub(2, -1):sub(1, -31)
+  local source = debug.getinfo(1, "S").source
+  local path = source:sub(2)
+  if vim.fs and vim.fs.dirname then
+    return vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(path))) .. "/"
+  end
+
+  return vim.fn.fnamemodify(path, ":h:h:h") .. "/"
 end
 
----Join path segments with '/'.
----@param ... string
----@return string
-local function path_join(...)
-    local parts = {...}
-    return table.concat(parts, "/")
-end
-
----Run a command and return output or throw with details.
----@param cmd string[]
----@return string
-local function run_command(cmd)
-    local output = vim.fn.system(cmd)
-    if vim.v.shell_error ~= 0 then
-        local formatted = table.concat(cmd, " ")
-        error(("Ollama Copilot command failed (%s): %s"):format(formatted, output))
-    end
-    return output
-end
-
----Resolve the Python executable used for the language server.
----When python_command is set, that interpreter is used directly.
----Otherwise a managed virtual environment is created/updated and used.
 ---@param config table
 ---@param root string
----@return string
+---@return string|nil python_bin
+---@return string|nil err
 local function resolve_python_command(config, root)
-    if config.python_command and config.python_command ~= "" then
-        return config.python_command
+  if config.python_command and config.python_command ~= "" then
+    local ok, output = probe_python_modules(config.python_command)
+    if ok then
+      return config.python_command, nil
     end
 
-    if not config.auto_manage_python_env then
-        return "python3"
-    end
+    return nil, table.concat({
+      "Ollama Copilot: provided python_command cannot import required modules.",
+      ("python_command: %s"):format(config.python_command),
+      "Expected imports: pygls, ollama",
+      "Fix by installing dependencies in that interpreter, or remove python_command and enable auto_manage_python_env.",
+      output,
+    }, "\n")
+  end
 
-    local venv_dir = config.python_venv_dir
-    if not venv_dir or venv_dir == "" then
-        venv_dir = path_join(vim.fn.stdpath("data"), "ollama-copilot", "venv")
-    end
+  if not config.auto_manage_python_env then
+    return nil, table.concat({
+      "Ollama Copilot: no python runtime configured.",
+      "Set python_command explicitly, or enable auto_manage_python_env.",
+    }, "\n")
+  end
 
-    local python_bin = path_join(venv_dir, "bin", "python")
-    local requirements = path_join(root, "python", "requirements.txt")
+  local venv_dir = config.python_venv_dir
+  if not venv_dir or venv_dir == "" then
+    venv_dir = table.concat({ vim.fn.stdpath("data"), "ollama-copilot", "venv" }, "/")
+  end
 
+  local python_bin = table.concat({ venv_dir, "bin", "python" }, "/")
+  local requirements = root .. "python/requirements.txt"
+
+  local ok, err = pcall(function()
     if vim.fn.executable(python_bin) == 0 then
-        run_command({config.python_bootstrap_command, "-m", "venv", venv_dir})
+      run_command_or_error({ config.python_bootstrap_command, "-m", "venv", venv_dir })
     end
 
-    local probe_cmd = {python_bin, "-c", "import pygls, ollama"}
-    vim.fn.system(probe_cmd)
-    if vim.v.shell_error ~= 0 then
-        run_command({python_bin, "-m", "pip", "install", "-U", "pip"})
-        run_command({python_bin, "-m", "pip", "install", "-r", requirements})
-        run_command(probe_cmd)
+    local has_modules = probe_python_modules(python_bin)
+    if not has_modules then
+      run_command_or_error({ python_bin, "-m", "pip", "install", "-U", "pip" })
+      run_command_or_error({ python_bin, "-m", "pip", "install", "-r", requirements })
+      run_command_or_error({ python_bin, "-c", IMPORT_PROBE })
     end
+  end)
 
-    return python_bin
+  if not ok then
+    return nil, table.concat({
+      "Ollama Copilot: failed to prepare managed Python environment.",
+      ("venv: %s"):format(venv_dir),
+      tostring(err),
+    }, "\n")
+  end
+
+  return python_bin, nil
+end
+
+---@param user_config table|nil
+---@return table
+local function merged_config(user_config)
+  return vim.tbl_deep_extend("force", vim.deepcopy(default_config), user_config or {})
 end
 
 local function disable_plugin()
-    if not enabled then return end
+  if not enabled then
+    return
+  end
 
-    local clients = vim.lsp.get_active_clients()
+  for _, client in ipairs(vim.lsp.get_clients({ name = "ollama_lsp" })) do
+    client.stop()
+  end
 
-    for _, client in ipairs(clients) do
-        if client.name == 'ollama_lsp' then
-            client.stop()
-        end
-    end
-    -- Set the enabled flag to false
-    enabled = false
+  enabled = false
 end
 
--- Merge user config with default config
-local function merge_config(user_config)
-    if user_config then
-        for k, v in pairs(user_config) do
-            if type(v) == "table" then
-                if default_config[k] == nil then
-                    default_config[k] = v
-                else
-                    for key, val in pairs(v) do
-                        default_config[k][key] = val
-                    end
-                end
-            else
-                default_config[k] = v
-            end
-        end
-    end
-    return default_config
+---@param name string
+---@param rhs function
+---@param opts table
+local function ensure_user_command(name, rhs, opts)
+  if vim.fn.exists(":" .. name) == 2 then
+    return
+  end
+
+  vim.api.nvim_create_user_command(name, rhs, opts)
 end
 
-
-function M.setup(user_config)
-    if user_config == nil then
-        user_config = {}
+---@param key string
+---@return function
+local function capture_insert_fallback(key)
+  local keymaps = vim.api.nvim_get_keymap("i")
+  for _, keymap in ipairs(keymaps) do
+    if keymap.lhs == key and type(keymap.callback) == "function" then
+      return keymap.callback
     end
-    local root = plugin_root()
+  end
 
-    print('Starting Ollama Copilot')
+  return function()
+    local termcoded = vim.api.nvim_replace_termcodes(key, true, false, true)
+    vim.api.nvim_feedkeys(termcoded, "n", false)
+  end
+end
 
-    local config = merge_config(user_config)
-    config.python_command = resolve_python_command(config, root)
+---@param provided table|nil
+---@return table
+local function resolve_capabilities(provided)
+  if provided then
+    return provided
+  end
 
-    -- Handle capabilities: use user-provided capabilities if available,
-    -- otherwise try to use cmp_nvim_lsp if installed, fallback to default
-    local capabilities
-    if config.capabilities then
-        capabilities = config.capabilities
-    else
-        local ok, cmp_nvim_lsp = pcall(require, 'cmp_nvim_lsp')
-        if ok then
-            capabilities = cmp_nvim_lsp.default_capabilities()
-        else
-            capabilities = vim.lsp.protocol.make_client_capabilities()
-        end
-    end
+  local ok, cmp_nvim_lsp = pcall(require, "cmp_nvim_lsp")
+  if ok and cmp_nvim_lsp and cmp_nvim_lsp.default_capabilities then
+    return cmp_nvim_lsp.default_capabilities()
+  end
 
-    if not configs.ollama_lsp then
-        configs.ollama_lsp = {
-            default_config = {
-                cmd = {config.python_command, root .. "python/ollama_lsp.py"},
-                filetypes = config.filetypes,
-                root_dir = function(fname)
-                    local potential_root = lspconfig.util.find_git_ancestor(fname)
-                    if potential_root then
-                        return potential_root
-                    else
-                        return lspconfig.util.path.dirname(fname)
-                    end
-                end,
-                settings = {},
-                init_options = {
-                    model_name = config.model_name,
-                    ollama_url = config.ollama_url,
-                    stream_suggestion = config.stream_suggestion,
-                    ollama_model_opts = config.ollama_model_opts,
-                },
-            },
-        }
-    end
-    function capture_tab_behavior()
-        -- Get the existing keymap for Tab in insert mode
-        local existing_tab_keymap = vim.api.nvim_get_keymap('i')
-        for _, keymap in ipairs(existing_tab_keymap) do
-            if keymap.lhs == '<Tab>' then
-                return keymap.callback
-            end
-        end
-        return function()
-            print('No original tab behavior found')
-        end
-    end
+  return vim.lsp.protocol.make_client_capabilities()
+end
 
-    original_tab_behaviour = capture_tab_behavior()
-    function tab_complete()
-        local visible = ghost_text.is_visible()
-        if visible then
-            paste_end = ghost_text.accept_first_extmark_lines()
-            local row_offset = paste_end[1]
-            local col_offset = paste_end[2] + 10
-            -- move cursor to the end of the line
-            print(row_offset, col_offset)
-            vim.api.nvim_win_set_cursor(0, { row_offset, col_offset })
-        else
-            original_tab_behaviour()
-        end
-    end
+---@param config table
+---@param root string
+---@param python_bin string
+local function configure_lsp(config, root, python_bin)
+  local lsp_default = {
+    cmd = { python_bin, root .. "python/ollama_lsp.py" },
+    filetypes = config.filetypes,
+    root_dir = function(fname)
+      return lspconfig.util.find_git_ancestor(fname) or lspconfig.util.path.dirname(fname)
+    end,
+    settings = {},
+    init_options = {
+      model_name = config.model_name,
+      ollama_url = config.ollama_url,
+      stream_suggestion = config.stream_suggestion,
+      ollama_model_opts = config.ollama_model_opts,
+    },
+  }
 
-
-    
-
-
-    
-    lspconfig.ollama_lsp.setup{
-        capabilities = capabilities,
-        on_attach = function(_, bufnr)
-            vim.api.nvim_create_user_command("OllamaSuggestion", ollama_client.request_completions, {desc = "Get Ollama Suggestion"})
-            vim.api.nvim_create_user_command("OllamaAccept", ghost_text.accept_first_extmark_lines, {desc = "Accepts displayed Ollama Suggestion"})
-            vim.api.nvim_create_user_command("OllamaReject", ghost_text.delete_first_extmark, {desc = "Rejects displayed Ollama Suggestion"})
-            vim.keymap.set("i", config.keymaps.insert_accept,
-                function()
-                    tab_complete()
-                end
-            )
-        end,
-        handlers = {
-            ["textDocument/completion"] = function(err, result, ctx, config)
-                local line = ctx['params']['position']['line']
-                local col = ctx['params']['position']['character']
-            end,
-            ['$/tokenStream'] = function(err, result, ctx, config)
-                local opts = ghost_text.build_opts_from_text(result['completion']['total'])
-                local cursor_line, cursor_col = unpack(vim.api.nvim_win_get_cursor(0))
-
-                ghost_text.add_extmark(result['line'], result['character'], opts)
-        
-            end,
-            ['$/clearSuggestion'] = function(err, result, ctx, config)
-                ghost_text.delete_first_extmark()
-            end
-        }
+  if not configs.ollama_lsp then
+    configs.ollama_lsp = {
+      default_config = lsp_default,
     }
+  else
+    configs.ollama_lsp.default_config = vim.tbl_deep_extend("force", configs.ollama_lsp.default_config or {}, lsp_default)
+  end
 
+  local fallback_insert = capture_insert_fallback(config.keymaps.insert_accept)
 
-    
+  lspconfig.ollama_lsp.setup({
+    capabilities = resolve_capabilities(config.capabilities),
+    on_attach = function(_, bufnr)
+      vim.keymap.set("i", config.keymaps.insert_accept, function()
+        if ghost_text.is_visible() then
+          ghost_text.accept_first_extmark_lines()
+          return
+        end
 
+        fallback_insert()
+      end, { buffer = bufnr, silent = true })
+    end,
+    handlers = {
+      ["textDocument/completion"] = function() end,
+      ["$/tokenStream"] = function(_, result)
+        if not result or not result.completion or not result.completion.total then
+          return
+        end
 
-    vim.api.nvim_command('augroup OllamaCopilot')
-    -- Auto commands
-    vim.api.nvim_create_autocmd("InsertLeave", {
-        pattern = "*",
-        callback = function()
-           ghost_text.delete_first_extmark()
-        end,
-    })
-    -- create autocmd to delete the ghost text when the cursor moves
-    vim.api.nvim_create_autocmd("CursorMoved", {
-        pattern = "*",
-        callback = function()
-            ghost_text.delete_first_extmark()
-        end,
-    })
-
-    
-    
-
-
-
-    vim.api.nvim_create_user_command("DisableOllamaCopilot", function() disable_plugin() end, {desc = "Disables Ollama Copilot"})
-  
-    vim.api.nvim_set_keymap('n', config.keymaps.suggestion, '<Cmd>OllamaSuggestion<CR>', { noremap = true })
-    vim.api.nvim_set_keymap('n', config.keymaps.reject, '<Cmd>OllamaReject<CR>', { noremap = true })
-
-
-    vim.api.nvim_command('augroup END')
-    
+        local opts = ghost_text.build_opts_from_text(result.completion.total)
+        ghost_text.add_extmark(result.line, result.character, opts)
+      end,
+      ["$/clearSuggestion"] = function()
+        ghost_text.delete_first_extmark()
+      end,
+    },
+  })
 end
 
+---@param config table
+local function configure_commands_and_autocmds(config)
+  ensure_user_command("OllamaSuggestion", ollama_client.request_completions, { desc = "Get Ollama suggestion" })
+  ensure_user_command("OllamaAccept", ghost_text.accept_first_extmark_lines, { desc = "Accept displayed Ollama suggestion" })
+  ensure_user_command("OllamaReject", ghost_text.delete_first_extmark, { desc = "Reject displayed Ollama suggestion" })
+  ensure_user_command("DisableOllamaCopilot", disable_plugin, { desc = "Disable Ollama Copilot" })
+
+  local group = vim.api.nvim_create_augroup("OllamaCopilot", { clear = true })
+  vim.api.nvim_create_autocmd({ "InsertLeave", "CursorMoved" }, {
+    group = group,
+    pattern = "*",
+    callback = function()
+      ghost_text.delete_first_extmark()
+    end,
+  })
+
+  vim.keymap.set("n", config.keymaps.suggestion, "<Cmd>OllamaSuggestion<CR>", { silent = true })
+  vim.keymap.set("n", config.keymaps.reject, "<Cmd>OllamaReject<CR>", { silent = true })
+end
+
+---Setup Ollama Copilot.
+---@param user_config table|nil
+function M.setup(user_config)
+  local config = merged_config(user_config)
+  local root = plugin_root()
+
+  local python_bin, err = resolve_python_command(config, root)
+  if not python_bin then
+    notify_error(err)
+    return
+  end
+
+  if (config.ollama_model_opts and config.ollama_model_opts.debug) or vim.env.OLLAMA_COPILOT_DEBUG == "1" then
+    vim.schedule(function()
+      vim.notify(("Ollama Copilot startup: python=%s root=%s"):format(python_bin, root), vim.log.levels.INFO)
+    end)
+  end
+
+  configure_lsp(config, root, python_bin)
+  configure_commands_and_autocmds(config)
+end
 
 return M
