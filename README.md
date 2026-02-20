@@ -47,7 +47,7 @@ Lazy:
   'jacob411/Ollama-Copilot',
   opts = {
     -- Prefer base code models for autocomplete, not *-instruct chat variants.
-    model_name = "qwen2.5-coder:7b",
+    model_name = "qwen2.5-coder:3b",
     ollama_url = "http://localhost:11434", -- URL for Ollama server, Leave blank to use default local instance.
     stream_suggestion = false,
     python_command = "python3",
@@ -124,7 +124,7 @@ debug_log_file = "/tmp/ollama-copilot-debug.log"
 ### Minimal Repro Script
 Use the included payload test script to verify prompt shape and suffix usage:
 ```bash
-cd ~/repo/fork/Ollama-Copilot
+cd ~/path/to/Ollama-Copilot
 python3 python/payload_debug_demo.py
 ```
   

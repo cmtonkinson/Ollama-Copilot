@@ -27,7 +27,10 @@ local default_config = {
     model_name = "deepseek-coder:base",
     ollama_url = "http://localhost:11434",
     stream_suggestion = false,
-    python_command = "python3",
+    python_command = nil,
+    auto_manage_python_env = true,
+    python_bootstrap_command = "python3",
+    python_venv_dir = nil,
     filetypes = {'python', 'lua','vim', "markdown"},
     capabilities = nil, -- Will be set automatically or can be overridden by user
     ollama_model_opts = {
@@ -55,6 +58,71 @@ local default_config = {
 
 
 local enabled = true
+
+---Build plugin root directory from this source file path.
+---@return string
+local function plugin_root()
+    local source = debug.getinfo(1, 'S').source
+    return source:sub(2, -1):sub(1, -31)
+end
+
+---Join path segments with '/'.
+---@param ... string
+---@return string
+local function path_join(...)
+    local parts = {...}
+    return table.concat(parts, "/")
+end
+
+---Run a command and return output or throw with details.
+---@param cmd string[]
+---@return string
+local function run_command(cmd)
+    local output = vim.fn.system(cmd)
+    if vim.v.shell_error ~= 0 then
+        local formatted = table.concat(cmd, " ")
+        error(("Ollama Copilot command failed (%s): %s"):format(formatted, output))
+    end
+    return output
+end
+
+---Resolve the Python executable used for the language server.
+---When python_command is set, that interpreter is used directly.
+---Otherwise a managed virtual environment is created/updated and used.
+---@param config table
+---@param root string
+---@return string
+local function resolve_python_command(config, root)
+    if config.python_command and config.python_command ~= "" then
+        return config.python_command
+    end
+
+    if not config.auto_manage_python_env then
+        return "python3"
+    end
+
+    local venv_dir = config.python_venv_dir
+    if not venv_dir or venv_dir == "" then
+        venv_dir = path_join(vim.fn.stdpath("data"), "ollama-copilot", "venv")
+    end
+
+    local python_bin = path_join(venv_dir, "bin", "python")
+    local requirements = path_join(root, "python", "requirements.txt")
+
+    if vim.fn.executable(python_bin) == 0 then
+        run_command({config.python_bootstrap_command, "-m", "venv", venv_dir})
+    end
+
+    local probe_cmd = {python_bin, "-c", "import pygls, ollama"}
+    vim.fn.system(probe_cmd)
+    if vim.v.shell_error ~= 0 then
+        run_command({python_bin, "-m", "pip", "install", "-U", "pip"})
+        run_command({python_bin, "-m", "pip", "install", "-r", requirements})
+        run_command(probe_cmd)
+    end
+
+    return python_bin
+end
 
 local function disable_plugin()
     if not enabled then return end
@@ -95,13 +163,12 @@ function M.setup(user_config)
     if user_config == nil then
         user_config = {}
     end
-    local cur_file = debug.getinfo(1, 'S').source
-    -- strip the leading '@' and lua/OllamaCopilot/start_up.lua from the end
+    local root = plugin_root()
 
     print('Starting Ollama Copilot')
-    cur_file = cur_file:sub(2, -1):sub(1, -31)
 
     local config = merge_config(user_config)
+    config.python_command = resolve_python_command(config, root)
 
     -- Handle capabilities: use user-provided capabilities if available,
     -- otherwise try to use cmp_nvim_lsp if installed, fallback to default
@@ -120,7 +187,7 @@ function M.setup(user_config)
     if not configs.ollama_lsp then
         configs.ollama_lsp = {
             default_config = {
-                cmd = {config.python_command, cur_file .. "python/ollama_lsp.py"},
+                cmd = {config.python_command, root .. "python/ollama_lsp.py"},
                 filetypes = config.filetypes,
                 root_dir = function(fname)
                     local potential_root = lspconfig.util.find_git_ancestor(fname)
